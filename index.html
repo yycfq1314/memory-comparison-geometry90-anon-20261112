@@ -38,7 +38,9 @@ function makeComparison(scene,index){
  function resumeBuffered(){
   if(group.resumePending)return;
   const remain=(scene.frames-1)/scene.fps-Math.min(...group.videos.map(v=>v.currentTime));
-  const needed=Math.min(2*group.rate,Math.max(0,remain-.05));
+  const needed=group.rate>=2?Math.max(0,remain-.025):Math.min(2*group.rate,Math.max(0,remain-.05));
+  const progress=Math.min(100,Math.floor(100*Math.min(...group.videos.map(v=>bufferedAhead(v)))/Math.max(.01,needed)));
+  play.textContent='Buffering '+progress+'%';
   if(!group.videos.every(v=>!v.seeking&&(v.readyState>=3||(remain<=.1&&v.readyState>=2))&&bufferedAhead(v)>=needed))return;
   group.resumePending=true;const version=group.playVersion;
   Promise.all(group.videos.map(v=>{v.playbackRate=group.rate;return v.play();})).then(()=>{
@@ -57,7 +59,7 @@ function makeComparison(scene,index){
  }
  for(const clip of scene.clips){const card=document.createElement('div');card.className='clip';const title=document.createElement('h2');title.textContent=clip.label;const v=document.createElement('video');v.muted=true;v.playsInline=true;v.preload='none';v.poster=clip.poster;v.setAttribute('aria-label',clip.label);const media=document.createElement('div');media.className='media';const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('highlights');svg.setAttribute('viewBox','0 0 832 480');svg.setAttribute('aria-hidden','true');media.append(v,svg);card.append(title,media);grid.append(card);group.videos.push(v);group.overlays.push(svg);for(const event of ['timeupdate','seeking','seeked','loadeddata'])v.addEventListener(event,()=>drawHighlights(svg,scene,v.currentTime));drawHighlights(svg,scene,0);}
  controls.append(play,restart,speedLabel,output);
- speed.addEventListener('change',()=>{group.rate=Number(speed.value);group.videos.forEach(v=>{v.defaultPlaybackRate=group.rate;v.playbackRate=group.rate;});});section.append(grid,controls,timeline);
+ speed.addEventListener('change',()=>{group.rate=Number(speed.value);group.videos.forEach(v=>{v.defaultPlaybackRate=group.rate;v.playbackRate=group.rate;});if(group.playing&&!group.buffering&&group.rate>=2)bufferGroup();});section.append(grid,controls,timeline);
  play.addEventListener('click',async()=>{if(group.playing){group.pause();return;}const version=++group.playVersion;play.disabled=true;play.textContent='Loading...';try{groups.forEach(other=>{if(other!==group)other.pause();});await load();if(version!==group.playVersion)return;if(Number(timeline.value)>=scene.frames-1){group.videos.forEach(v=>{v.currentTime=0;});display(0);}group.videos.forEach(v=>{v.playbackRate=group.rate;});group.playing=true;group.resumePending=false;bufferGroup();tick();}catch(error){group.pause();document.getElementById('error').textContent=error.message;}finally{play.disabled=false;}});
  restart.addEventListener('click',async()=>{group.pause();try{await load();seek(0);}catch(error){document.getElementById('error').textContent=error.message;}});
  timeline.addEventListener('input',()=>seek(timeline.value));
