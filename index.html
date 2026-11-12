@@ -18,9 +18,9 @@ function makeComparison(scene,index){
  const speed=document.createElement('select');speed.setAttribute('aria-label','Comparison '+(index+1)+' playback speed');for(const rate of [1,1.5,2,3,4]){const option=document.createElement('option');option.value=String(rate);option.textContent=rate+'\u00d7';speed.append(option);}speed.value='1';speedLabel.append(speed);
  const output=document.createElement('output');output.textContent='00:00 / '+clock(scene.frames/scene.fps);
  const timeline=document.createElement('input');timeline.type='range';timeline.min=0;timeline.max=scene.frames-1;timeline.value=0;timeline.step=1;timeline.className='timeline';timeline.setAttribute('aria-label','Comparison '+(index+1)+' timeline');timeline.disabled=true;
- const group={section,videos:[],overlays:[],playing:false,ready:false,loading:null,raf:0,playVersion:0,rate:1};groups.push(group);
+ const group={section,videos:[],overlays:[],playing:false,ready:false,loading:null,raf:0,playVersion:0,rate:1,buffering:false,resumePending:false,lastSync:0};groups.push(group);
  function display(t){group.overlays.forEach((svg,i)=>drawHighlights(svg,scene,group.videos[i].currentTime||t));timeline.value=Math.min(scene.frames-1,Math.floor(t*scene.fps+.001));output.textContent=clock(t)+' / '+clock(scene.frames/scene.fps);}
- group.pause=()=>{group.playVersion++;group.playing=false;group.videos.forEach(v=>v.pause());cancelAnimationFrame(group.raf);play.textContent='Play all';};
+ group.pause=()=>{group.playVersion++;group.playing=false;group.buffering=false;group.resumePending=false;group.videos.forEach(v=>v.pause());cancelAnimationFrame(group.raf);play.textContent='Play all';};
  async function load(){
   if(group.loading)return group.loading;
   group.loading=Promise.all(group.videos.map((v,i)=>new Promise((resolve,reject)=>{
@@ -29,11 +29,36 @@ function makeComparison(scene,index){
   return group.loading;
  }
  function seek(f){const t=Math.max(0,Math.min(scene.frames-1,Math.round(Number(f)||0)))/scene.fps;group.pause();group.videos.forEach(v=>{v.currentTime=t;});display(t);}
- function tick(){if(!group.playing)return;const main=group.videos[0];if(main.ended||main.currentTime>=(scene.frames-1)/scene.fps){seek(scene.frames-1);return;}group.videos.slice(1).forEach(v=>{if(!v.seeking&&Math.abs(v.currentTime-main.currentTime)>.10)v.currentTime=main.currentTime;});display(main.currentTime);group.raf=requestAnimationFrame(tick);}
+ function bufferedAhead(v,t=v.currentTime){for(let i=0;i<v.buffered.length;i++){if(v.buffered.start(i)<=t+.025&&v.buffered.end(i)>t)return v.buffered.end(i)-t;}return 0;}
+ function bufferGroup(){
+  group.buffering=true;group.videos.forEach(v=>v.pause());play.textContent='Buffering...';
+  const t=Math.min(...group.videos.map(v=>v.currentTime));
+  if(group.videos.every(v=>bufferedAhead(v,t)>0)){group.videos.forEach(v=>{if(Math.abs(v.currentTime-t)>.15)v.currentTime=t;});}
+ }
+ function resumeBuffered(){
+  if(group.resumePending)return;
+  const remain=(scene.frames-1)/scene.fps-Math.min(...group.videos.map(v=>v.currentTime));
+  const needed=Math.min(2*group.rate,Math.max(0,remain-.05));
+  if(!group.videos.every(v=>!v.seeking&&(v.readyState>=3||(remain<=.1&&v.readyState>=2))&&bufferedAhead(v)>=needed))return;
+  group.resumePending=true;const version=group.playVersion;
+  Promise.all(group.videos.map(v=>{v.playbackRate=group.rate;return v.play();})).then(()=>{
+   if(!group.playing||version!==group.playVersion)return;
+   group.buffering=false;play.textContent='Pause all';group.lastSync=Date.now();
+  }).catch(error=>{if(version===group.playVersion){group.pause();document.getElementById('error').textContent=error.message;}}).finally(()=>{if(version===group.playVersion)group.resumePending=false;});
+ }
+ function tick(){
+  if(!group.playing)return;
+  const times=group.videos.map(v=>v.currentTime),t=Math.min(...times),end=(scene.frames-1)/scene.fps;
+  if(t>=end-.025){seek(scene.frames-1);return;}
+  if(group.buffering)resumeBuffered();
+  else if(group.videos.some(v=>v.readyState<3||v.seeking||bufferedAhead(v)<Math.min(.12*group.rate,end-v.currentTime)))bufferGroup();
+  else if(Date.now()-group.lastSync>=1500&&Math.max(...times)-t>.35)bufferGroup();
+  display(t);group.raf=requestAnimationFrame(tick);
+ }
  for(const clip of scene.clips){const card=document.createElement('div');card.className='clip';const title=document.createElement('h2');title.textContent=clip.label;const v=document.createElement('video');v.muted=true;v.playsInline=true;v.preload='none';v.poster=clip.poster;v.setAttribute('aria-label',clip.label);const media=document.createElement('div');media.className='media';const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('highlights');svg.setAttribute('viewBox','0 0 832 480');svg.setAttribute('aria-hidden','true');media.append(v,svg);card.append(title,media);grid.append(card);group.videos.push(v);group.overlays.push(svg);for(const event of ['timeupdate','seeking','seeked','loadeddata'])v.addEventListener(event,()=>drawHighlights(svg,scene,v.currentTime));drawHighlights(svg,scene,0);}
  controls.append(play,restart,speedLabel,output);
  speed.addEventListener('change',()=>{group.rate=Number(speed.value);group.videos.forEach(v=>{v.defaultPlaybackRate=group.rate;v.playbackRate=group.rate;});});section.append(grid,controls,timeline);
- play.addEventListener('click',async()=>{if(group.playing){group.pause();return;}const version=++group.playVersion;play.disabled=true;play.textContent='Loading...';try{await load();if(version!==group.playVersion)return;groups.forEach(other=>{if(other!==group)other.pause();});if(Number(timeline.value)>=scene.frames-1){group.videos.forEach(v=>{v.currentTime=0;});display(0);}await Promise.all(group.videos.map(v=>{v.playbackRate=group.rate;return v.play();}));if(version!==group.playVersion){group.videos.forEach(v=>v.pause());return;}group.playing=true;play.textContent='Pause all';tick();}catch(error){group.pause();document.getElementById('error').textContent=error.message;}finally{play.disabled=false;}});
+ play.addEventListener('click',async()=>{if(group.playing){group.pause();return;}const version=++group.playVersion;play.disabled=true;play.textContent='Loading...';try{await load();if(version!==group.playVersion)return;groups.forEach(other=>{if(other!==group)other.pause();});if(Number(timeline.value)>=scene.frames-1){group.videos.forEach(v=>{v.currentTime=0;});display(0);}group.videos.forEach(v=>{v.preload='auto';v.playbackRate=group.rate;if(!group.fullPreload){const t=v.currentTime;v.addEventListener('loadedmetadata',()=>{if(t>0)v.currentTime=t;},{once:true});v.load();}});group.fullPreload=true;group.playing=true;group.resumePending=false;bufferGroup();tick();}catch(error){group.pause();document.getElementById('error').textContent=error.message;}finally{play.disabled=false;}});
  restart.addEventListener('click',async()=>{group.pause();try{await load();seek(0);}catch(error){document.getElementById('error').textContent=error.message;}});
  timeline.addEventListener('input',()=>seek(timeline.value));
  if('IntersectionObserver'in window){const observer=new IntersectionObserver(entries=>{for(const e of entries){if(e.isIntersecting)load().catch(error=>{document.getElementById('error').textContent=error.message;});else group.pause();}},{rootMargin:'300px'});observer.observe(section);}else load().catch(error=>{document.getElementById('error').textContent=error.message;});
